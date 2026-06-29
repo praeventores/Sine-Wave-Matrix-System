@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Matrix Terminal — Cloudflare Node</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #0d0d0f;
+            color: #d1d1d6;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .terminal-container {
+            border: 2px solid #242428;
+            background: #141417;
+            padding: 40px;
+            border-radius: 6px;
+            text-align: center;
+            box-shadow: 0 12px 32px rgba(0,0,0,0.7);
+            max-width: 550px;
+            width: 90%;
+        }
+
+        h1 {
+            color: #ff3e3e;
+            font-size: 1.3rem;
+            margin-top: 0;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+        }
+
+        .input-wrapper {
+            margin: 25px 0;
+        }
+
+        .audio-input {
+            width: 100%;
+            background: #09090b;
+            border: 1px solid #3f3f46;
+            padding: 15px;
+            box-sizing: border-box;
+            color: #ffffff;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 1.2rem;
+            border-radius: 4px;
+            text-align: center;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        .audio-input:focus {
+            border-color: #ff3e3e;
+            box-shadow: 0 0 8px rgba(255, 62, 62, 0.2);
+        }
+
+        .audio-input:disabled {
+            background: #101014;
+            border-color: #52525b;
+            color: #52525b;
+            opacity: 0.5;
+        }
+
+        .data-stream {
+            background: #09090b;
+            border: 1px solid #222;
+            padding: 15px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            min-height: 45px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #71717a;
+        }
+
+        .active-metrics {
+            color: #a1a1aa;
+        }
+
+        .status-indicator {
+            font-size: 0.75rem;
+            color: #52525b;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="terminal-container">
+    <div class="status-indicator" id="engineStatus">Click anywhere to connect cloudflare node</div>
+    <h1>Cloudflare Audio Node</h1>
+    
+    <div class="input-wrapper">
+        <input type="text" class="audio-input" id="textReceiver" placeholder="Establish link first..." autocomplete="off" disabled>
+    </div>
+    
+    <div class="data-stream">
+        <div id="metricDisplay">Terminal Offline</div>
+    </div>
+</div>
+
+<script>
+    // TARGET WORKER ENDPOINT ADDRESS
+    const WORKER_WS_URL = "wss://YOUR_WORKER_SUBDOMAIN.workers.dev/ws";
+
+    let socket = null;
+    let audioCtx = null;
+    const activeVoices = {};
+    let messageSequence = [];
+    let isPlayingBack = false;
+
+    const inputElement = document.getElementById('textReceiver');
+
+    function initAudioAndNetwork() {
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            connectWebSocket();
+        }
+    }
+
+    function connectWebSocket() {
+        document.getElementById('engineStatus').innerText = "CONNECTING TO EDGE EDGE...";
+        document.getElementById('engineStatus').style.color = "#ff3e3e";
+
+        socket = new WebSocket(WORKER_WS_URL);
+
+        socket.onopen = () => {
+            document.getElementById('engineStatus').innerText = "NODE LINK ESTABLISHED // SECURE SIGNAL";
+            document.getElementById('engineStatus').style.color = "#04d361";
+            document.getElementById('metricDisplay').innerText = "Ready to transmit...";
+            inputElement.disabled = false;
+            inputElement.placeholder = "Type message and press ENTER...";
+            inputElement.focus();
+        };
+
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data && data.sequence) {
+                    playbackNetworkSequence(data.content, data.sequence);
+                }
+            } catch (err) {
+                console.error("Parsing incoming sequence failed", err);
+            }
+        };
+
+        socket.onclose = () => {
+            document.getElementById('engineStatus').innerText = "LINK DISCONNECTED — ATTEMPTING REBOOT";
+            document.getElementById('engineStatus').style.color = "#ff3e3e";
+            inputElement.disabled = true;
+            // Auto retry hook after 3 seconds
+            setTimeout(connectWebSocket, 3000);
+        };
+    }
+
+    function getBaseFrequency(char) {
+        const code = char.charCodeAt(0);
+        const relativeIndex = code - 32; 
+        return Math.pow(2, (relativeIndex - 40) / 12) * 440;
+    }
+
+    inputElement.addEventListener('keydown', (event) => {
+        if (isPlayingBack) { event.preventDefault(); return; }
+
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            const textContent = inputElement.value.trim();
+            if (messageSequence.length > 0 && textContent !== "" && socket.readyState === WebSocket.OPEN) {
+                
+                // Pack up array payload structure and ship over WebSocket
+                socket.send(JSON.stringify({
+                    content: textContent,
+                    sequence: messageSequence
+                }));
+
+                inputElement.value = "";
+                messageSequence = []; 
+            }
+            return;
+        }
+
+        if (event.ctrlKey || event.altKey || event.metaKey) return;
+        const key = event.key;
+        if (activeVoices[key]) return;
+
+        messageSequence.push(key);
+
+        const baseFreq = getBaseFrequency(key);
+        if (!isNaN(baseFreq)) {
+            triggerTone(key, baseFreq, 'triangle', 0.12, 0.01, 0.15);
+        }
+    });
+
+    inputElement.addEventListener('keyup', (event) => {
+        const key = event.key;
+        if (activeVoices[key]) {
+            const { oscillator, gainNode } = activeVoices[key];
+            gainNode.gain.setValueAtTime(gainNode.gain.value, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.1);
+            oscillator.stop(audioCtx.currentTime + 0.1);
+            delete activeVoices[key];
+        }
+    });
+
+    function playbackNetworkSequence(rawText, sequenceArray) {
+        isPlayingBack = true;
+        inputElement.disabled = true;
+        
+        let index = 0;
+        const tempoSpacing = 160; 
+
+        document.getElementById('engineStatus').innerText = "INCOMING NETWORK STREAM...";
+        document.getElementById('engineStatus').style.color = "#ffffd3";
+
+        function playNextNode() {
+            if (index >= sequenceArray.length) {
+                setTimeout(() => {
+                    isPlayingBack = false;
+                    inputElement.disabled = false;
+                    document.getElementById('engineStatus').innerText = "NODE LINK ESTABLISHED // SECURE SIGNAL";
+                    document.getElementById('engineStatus').style.color = "#04d361";
+                    document.getElementById('metricDisplay').innerText = `Last Transmission: "${rawText}"`;
+                    inputElement.focus();
+                }, 300);
+                return;
+            }
+
+            const currentChar = sequenceArray[index];
+            const frequency = getBaseFrequency(currentChar);
+
+            document.getElementById('metricDisplay').innerHTML = `
+                <span class="active-metrics" style="color: #04d361;">Receiving Node [${index + 1}/${sequenceArray.length}]: '${currentChar === ' ' ? 'SPACE' : currentChar}'</span>
+            `;
+
+            triggerTransientTone(frequency, 'triangle', 0.15, 0.25);
+            const randomFreq = Math.floor(Math.random() * 800) + 150;
+            triggerTransientTone(randomFreq, 'sine', 0.04, 0.12);
+
+            index++;
+            setTimeout(playNextNode, tempoSpacing);
+        }
+
+        playNextNode();
+    }
+
+    function triggerTone(id, frequency, type, volume, attack, release) {
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+        gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+        gainNode.gain.linearRampToValueAtTime(volume, audioCtx.currentTime + attack);
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        oscillator.start();
+        activeVoices[id] = { oscillator, gainNode };
+    }
+
+    function triggerTransientTone(frequency, type, volume, duration) {
+        if (isNaN(frequency)) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(volume, audioCtx.currentTime + 0.005);
+        gain.gain.setValueAtTime(volume, audioCtx.currentTime + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    }
+
+    window.addEventListener('click', () => {
+        initAudioAndNetwork();
+    });
+</script>
+
+</body>
+</html>
