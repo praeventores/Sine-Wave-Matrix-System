@@ -1,2 +1,1 @@
-# Sine-Wave-Matrix-System
-An audio message system similar to gibberlink
+This is under an MIT License, and it's public to use.
